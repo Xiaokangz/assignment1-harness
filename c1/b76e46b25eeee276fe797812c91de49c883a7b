@@ -1,0 +1,21 @@
+cs329z_hw1/llm.py
+  s_fe0d98fd36a2f1::t_8282642ddb9ddd 70
+.env.example
+  s_fe0d98fd36a2f1::t_8d4edfe0989d94 5-8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.52-trip",
+  "base_commit_sha": "c1b76e46b25eeee276fe797812c91de49c883a7b",
+  "prompts": {},
+  "sessions": {
+    "s_fe0d98fd36a2f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d1eea5fd-dc11-4176-9052-503661c441d4",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "zxiaokang <zxiaokang@trip.com>"
+    }
+  }
+}
