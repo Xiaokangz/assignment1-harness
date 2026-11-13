@@ -1,0 +1,28 @@
+cs329z_hw1/llm.py
+  s_fe0d98fd36a2f1::t_f0793c8e901859 60-73
+  s_fe0d98fd36a2f1::t_5ba9e8cdd29d98 264-266
+  s_fe0d98fd36a2f1::t_951fcd2b253b2b 307
+  s_fe0d98fd36a2f1::t_abeb24c3b44b0f 401,405-406,408,410,414,421-423,428,430,439,441
+  s_fe0d98fd36a2f1::t_8398093dec0885 101-106,111-113
+  s_fe0d98fd36a2f1::t_ab89a5edb27c3d 157-167,169-173
+  s_fe0d98fd36a2f1::t_a361166526cd92 168
+  s_fe0d98fd36a2f1::t_4a2ebf6e7a94a3 354-358
+.env.example
+  s_fe0d98fd36a2f1::t_a8cbdef03e1130 4-9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.52-trip",
+  "base_commit_sha": "bb3810ca6755e40c85662293b526ce3e417138b5",
+  "prompts": {},
+  "sessions": {
+    "s_fe0d98fd36a2f1": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "d1eea5fd-dc11-4176-9052-503661c441d4",
+        "model": "claude-fable-5-2"
+      },
+      "human_author": "zxiaokang <zxiaokang@trip.com>"
+    }
+  }
+}
