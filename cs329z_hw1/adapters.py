@@ -61,7 +61,9 @@ def run_priority(email: Email, lm: LMCallable) -> dict:
     * The function does not raise and does not modify ``email``.
     * Live: at least 85% agreement with tests/fixtures/priority_gold.json.
     """
-    raise NotImplementedError
+    from cs329z_hw1.pipelines.priority import classify_priority
+
+    return classify_priority(email, lm)
 
 
 def run_daily_digest(emails: list[Email], lm: LMCallable) -> str:
@@ -79,7 +81,9 @@ def run_daily_digest(emails: list[Email], lm: LMCallable) -> str:
       site that email is about; it contains no term listed for the gold
       ignore emails.
     """
-    raise NotImplementedError
+    from cs329z_hw1.pipelines.digest import write_digest
+
+    return write_digest(emails, lm)
 
 
 def run_bm25_build(docs: list[str]) -> Any:
