@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import threading
+from pathlib import Path
 
 from cs329z_hw1.cardinal import CARDINAL_TOOLS, cardinal_spec
 from cs329z_hw1.types import AgentConfig, ToolSpec
@@ -37,8 +39,19 @@ _DESCRIPTIONS = {
         "Write multi-line Python as python3 -c '...'. Do not use a here-document. "
         "A long output is truncated."
     ),
-    "remember": "Store one fact for later conversations. fact is the sentence to store.",
-    "recall": "Find facts stored earlier. query describes what to look for.",
+    "remember": (
+        "Save one fact that must persist for later conversations. Call this, and do not "
+        "only acknowledge, when the person states a preference, identity, cost center, "
+        "team, employee number, or a definition such as what a shorthand refers to. "
+        "fact is that sentence, copied from what they said."
+    ),
+    "recall": (
+        "Look up facts saved in earlier conversations before answering anything about "
+        "the person, their team, their codes, or what they mean by a shorthand. "
+        "query describes what to find. If a stored fact defines a shorthand, follow that "
+        "definition and do not answer from a different document. Returns the matching "
+        "facts, or says that nothing matched."
+    ),
     "ask_user": "Ask the person a question and return their answer. question is what to ask.",
 }
 
@@ -220,16 +233,60 @@ def _format_terminal(result) -> str:
     return "\n".join(lines)
 
 
+def _facts_path(config: AgentConfig) -> Path | None:
+    if config.memory_dir is None:
+        return None
+    return Path(config.memory_dir) / "facts.jsonl"
+
+
+def _load_facts(config: AgentConfig) -> list[str]:
+    path = _facts_path(config)
+    if path is None or not path.is_file():
+        return []
+    facts = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        fact = obj.get("fact") if isinstance(obj, dict) else None
+        if isinstance(fact, str) and fact.strip():
+            facts.append(fact)
+    return facts
+
+
 def _remember(config: AgentConfig):
     def remember(fact: str) -> str:
-        return "Memory storage is not available yet."
+        path = _facts_path(config)
+        if path is None:
+            return "No memory directory is configured."
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"fact": fact}, ensure_ascii=False) + "\n")
+        return "Stored."
 
     return remember
 
 
 def _recall(config: AgentConfig):
     def recall(query: str) -> str:
-        return "Memory lookup is not available yet."
+        from cs329z_hw1.tokenizer import tokenize
+
+        facts = _load_facts(config)
+        if not facts:
+            return "No stored facts matched."
+        query_terms = set(tokenize(query))
+        ranked = []
+        for fact in facts:
+            overlap = len(query_terms & set(tokenize(fact)))
+            if overlap:
+                ranked.append((overlap, fact))
+        if not ranked:
+            return "No stored facts matched."
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        return "\n".join(fact for _overlap, fact in ranked)
 
     return recall
 
