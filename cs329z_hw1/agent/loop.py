@@ -6,6 +6,7 @@ import copy
 
 from cs329z_hw1.agent.protocol import parse_response, render_tools
 from cs329z_hw1.agent.registry import Registry
+from cs329z_hw1.agent.tools import build_tools
 from cs329z_hw1.llm import OutputTruncated
 from cs329z_hw1.tokens import count_message_tokens, count_tokens
 from cs329z_hw1.types import AgentConfig, AgentResult, ToolSpec
@@ -22,7 +23,7 @@ class Session:
         self.aux_lm = lm if config.aux_lm is None else config.aux_lm
         self.config = config
         self.mode = config.mode
-        self.registry = Registry(list(tools or []))
+        self.registry = Registry(build_tools(tools, config))
         self.transcript: list[dict] = []
         self.messages: list[dict] = [
             {
