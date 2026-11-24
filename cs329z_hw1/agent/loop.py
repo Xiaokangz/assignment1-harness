@@ -12,7 +12,7 @@ from cs329z_hw1.agent.registry import Registry
 from cs329z_hw1.agent.tools import build_tools
 from cs329z_hw1.llm import OutputTruncated
 from cs329z_hw1.tokens import count_message_tokens, count_tokens
-from cs329z_hw1.types import AgentConfig, AgentResult, ToolSpec
+from cs329z_hw1.types import AgentConfig, AgentResult, ToolCall, ToolSpec
 
 _MALFORMED_STATUSES = ("unknown_tool", "invalid_args")
 _MALFORMED_LIMIT = 3
@@ -96,19 +96,23 @@ class Session:
                 text = parsed.text.strip() or reply.strip() or "Done."
                 return self._finish("done", text)
             call = parsed.tool_call
-            result = self.registry.execute(call.name, call.args)
             self._append({"type": "tool_call", "name": call.name, "args": copy.deepcopy(call.args)})
-            self.items.append({"role": "user", "kind": "tool", "content": result.content})
-            self._compact()
-            shown = self.items[-1]["content"]
-            self._append(
-                {
-                    "type": "tool_result",
-                    "name": call.name,
-                    "status": result.status,
-                    "content": shown,
-                }
-            )
+            rejected = self.registry.validate(call.name, call.args)
+            if rejected is not None:
+                self._record_tool_result(call.name, rejected.status, rejected.content)
+                streak += 1
+                if streak >= _MALFORMED_LIMIT:
+                    return self._finish("malformed", "Stopped because three replies in a row were malformed.")
+                continue
+            if self._needs_approval(call.name):
+                decision = self.config.user.approve(ToolCall(call.name, copy.deepcopy(call.args)))
+                if not decision.approved:
+                    reason = (decision.reason or "").strip() or "The user declined this action."
+                    self._record_tool_result(call.name, "denied", reason)
+                    streak = 0
+                    continue
+            result = self.registry.execute(call.name, call.args)
+            self._record_tool_result(call.name, result.status, result.content)
             if result.status in _MALFORMED_STATUSES:
                 streak += 1
                 if streak >= _MALFORMED_LIMIT:
@@ -116,9 +120,41 @@ class Session:
             else:
                 streak = 0
 
+    def _needs_approval(self, name: str) -> bool:
+        """Confirm mode asks before a tool that is not read-only."""
+        if self.mode != "confirm" or self.config.user is None:
+            return False
+        spec = self.registry._by_name.get(name)
+        return spec is not None and not spec.read_only
+
+    def _record_tool_result(self, name: str, status: str, content: str) -> None:
+        self.items.append({"role": "user", "kind": "tool", "content": content})
+        self._compact()
+        shown = self.items[-1]["content"]
+        self._append(
+            {
+                "type": "tool_result",
+                "name": name,
+                "status": status,
+                "content": shown,
+            }
+        )
+
     def _prepare_call(self) -> list[dict]:
+        self._take_steering()
         self._compact()
         return [{"role": item["role"], "content": item["content"]} for item in self.items]
+
+    def _take_steering(self) -> None:
+        """One poll per model call. A pending message becomes a user turn."""
+        user = self.config.user
+        if user is None:
+            return
+        message = user.pending_message()
+        if not message:
+            return
+        self._append({"type": "user", "content": message})
+        self.items.append({"role": "user", "kind": "user", "content": message})
 
     def _compact(self) -> None:
         """Keep every model call within context_budget. The current user message stays."""
