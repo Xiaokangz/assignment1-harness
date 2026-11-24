@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import copy
+import json
+import tempfile
+from pathlib import Path
 
 from cs329z_hw1.agent.protocol import parse_response, render_tools
 from cs329z_hw1.agent.registry import Registry
@@ -13,6 +16,11 @@ from cs329z_hw1.types import AgentConfig, AgentResult, ToolSpec
 
 _MALFORMED_STATUSES = ("unknown_tool", "invalid_args")
 _MALFORMED_LIMIT = 3
+
+_SUMMARY_SYSTEM = """Summarize this conversation excerpt for another assistant who will not see the original messages.
+
+Keep every constraint, number, date, name, place, amount, and decision verbatim. If the user stated a budget, a dollar amount, or a city, copy those words exactly. Keep the facts from any earlier summary. Be compact, under 300 words.
+"""
 
 
 class Session:
@@ -25,9 +33,12 @@ class Session:
         self.mode = config.mode
         self.registry = Registry(build_tools(tools, config))
         self.transcript: list[dict] = []
-        self.messages: list[dict] = [
+        self.context_dir = Path(tempfile.mkdtemp(prefix="cs329z-context-"))
+        self._snapshot = 0
+        self.items: list[dict] = [
             {
                 "role": "system",
+                "kind": "system",
                 "content": (
                     "You are an assistant that answers the user and calls tools when needed. "
                     "A reply with no tool call is the final answer.\n\n"
@@ -41,7 +52,7 @@ class Session:
 
     def send(self, user_message: str) -> AgentResult:
         self._append({"type": "user", "content": user_message})
-        self.messages.append({"role": "user", "content": user_message})
+        self.items.append({"role": "user", "kind": "user", "content": user_message})
         turns = 0
         tokens = 0
         streak = 0
@@ -52,30 +63,31 @@ class Session:
                 return self._finish("max_turns", "Stopped because this message reached the turn limit.")
             if tokens >= self.config.token_budget:
                 return self._finish("token_budget", "Stopped because this message reached the token budget.")
+            messages = self._prepare_call()
             try:
-                reply = self.lm(self.messages)
+                reply = self.lm(messages)
             except OutputTruncated as exc:
                 partial = exc.text or ""
                 turns += 1
-                tokens += count_message_tokens(self.messages) + count_tokens(partial)
+                tokens += count_message_tokens(messages) + count_tokens(partial)
                 feedback = "The model reply was cut off before it finished. Send one complete reply."
                 self._append({"type": "assistant", "content": partial})
                 self._append({"type": "error", "content": feedback})
-                self.messages.append({"role": "assistant", "content": partial})
-                self.messages.append({"role": "user", "content": feedback})
+                self.items.append({"role": "assistant", "kind": "assistant", "content": partial})
+                self.items.append({"role": "user", "kind": "error", "content": feedback})
                 streak += 1
                 if streak >= _MALFORMED_LIMIT:
                     return self._finish("malformed", "Stopped because three replies in a row were malformed.")
                 continue
             turns += 1
-            tokens += count_message_tokens(self.messages) + count_tokens(reply)
+            tokens += count_message_tokens(messages) + count_tokens(reply)
             self._append({"type": "assistant", "content": reply})
-            self.messages.append({"role": "assistant", "content": reply})
+            self.items.append({"role": "assistant", "kind": "assistant", "content": reply})
             parsed = parse_response(reply)
             if parsed.error:
                 feedback = parsed.error.strip() or "The reply could not be parsed."
                 self._append({"type": "error", "content": feedback})
-                self.messages.append({"role": "user", "content": feedback})
+                self.items.append({"role": "user", "kind": "error", "content": feedback})
                 streak += 1
                 if streak >= _MALFORMED_LIMIT:
                     return self._finish("malformed", "Stopped because three replies in a row were malformed.")
@@ -86,9 +98,9 @@ class Session:
             call = parsed.tool_call
             result = self.registry.execute(call.name, call.args)
             self._append({"type": "tool_call", "name": call.name, "args": copy.deepcopy(call.args)})
-            self.messages.append({"role": "user", "content": result.content})
-            self._fit_context()
-            shown = self.messages[-1]["content"]
+            self.items.append({"role": "user", "kind": "tool", "content": result.content})
+            self._compact()
+            shown = self.items[-1]["content"]
             self._append(
                 {
                     "type": "tool_result",
@@ -104,21 +116,95 @@ class Session:
             else:
                 streak = 0
 
-    def _fit_context(self) -> None:
-        """Shorten the oldest long tool results until the next call fits."""
+    def _prepare_call(self) -> list[dict]:
+        self._compact()
+        return [{"role": item["role"], "content": item["content"]} for item in self.items]
+
+    def _compact(self) -> None:
+        """Keep every model call within context_budget. The current user message stays."""
         budget = self.config.context_budget
-        for _ in range(40):
-            if count_message_tokens(self.messages) <= budget:
+        for _ in range(80):
+            if self._size() <= budget:
                 return
-            candidates = [
-                i
-                for i, message in enumerate(self.messages)
-                if message["role"] == "user" and len(message["content"]) > 80
-            ]
-            if not candidates:
+            if self._summarize_prefix():
+                continue
+            if not self._truncate_largest():
                 return
-            index = candidates[0]
-            self.messages[index]["content"] = _shorten(self.messages[index]["content"])
+
+    def _summarize_prefix(self) -> bool:
+        """Replace turns before the current user message with one aux_lm summary."""
+        user_at = self._current_user_index()
+        chunk = self.items[1:user_at]
+        if not chunk or all(item["kind"] == "summary" for item in chunk):
+            return False
+        self._archive(chunk)
+        excerpt = "\n\n".join(f"{item['role']}: {item['content']}" for item in chunk)
+        try:
+            summary = self.aux_lm(
+                [
+                    {"role": "system", "content": _SUMMARY_SYSTEM},
+                    {"role": "user", "content": excerpt},
+                ]
+            )
+        except Exception:
+            summary = "Earlier conversation omitted."
+        text = str(summary).strip() or "Earlier conversation omitted."
+        self.items[1:user_at] = [{"role": "user", "kind": "summary", "content": text}]
+        return True
+
+    def _truncate_largest(self) -> bool:
+        """Shorten the largest message that is not the system prompt or the current user message."""
+        user_at = self._current_user_index()
+        candidates = [
+            i
+            for i in range(len(self.items))
+            if i != 0 and i != user_at and self.items[i]["kind"] != "user"
+        ]
+        if not candidates:
+            return False
+        index = max(candidates, key=lambda i: len(self.items[i]["content"]))
+        item = self.items[index]
+        if len(item["content"]) <= 40:
+            return False
+        if not item.get("archived"):
+            self._archive([item])
+            item["archived"] = True
+        item["content"] = _shorten(item["content"])
+        return True
+
+    def _current_user_index(self) -> int:
+        for index in range(len(self.items) - 1, -1, -1):
+            if self.items[index]["kind"] == "user":
+                return index
+        return len(self.items)
+
+    def _size(self) -> int:
+        return count_message_tokens(self._payload())
+
+    def _payload(self) -> list[dict]:
+        return [{"role": item["role"], "content": item["content"]} for item in self.items]
+
+    def _archive(self, items: list[dict]) -> None:
+        """Write the pre-compaction messages to this session's directory."""
+        self.context_dir.mkdir(parents=True, exist_ok=True)
+        self._snapshot += 1
+        snapshot = [
+            {"role": item["role"], "content": item["content"]}
+            for item in self._payload()
+        ]
+        (self.context_dir / f"before-{self._snapshot:04d}.json").write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        with (self.context_dir / "dropped.jsonl").open("a", encoding="utf-8") as handle:
+            for item in items:
+                handle.write(
+                    json.dumps(
+                        {"role": item["role"], "content": item["content"]},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
 
     def _append(self, event: dict) -> None:
         self.transcript.append(event)
