@@ -86,22 +86,39 @@ class Session:
             call = parsed.tool_call
             result = self.registry.execute(call.name, call.args)
             self._append({"type": "tool_call", "name": call.name, "args": copy.deepcopy(call.args)})
+            self.messages.append({"role": "user", "content": result.content})
+            self._fit_context()
+            shown = self.messages[-1]["content"]
             self._append(
                 {
                     "type": "tool_result",
                     "name": call.name,
                     "status": result.status,
-                    "content": result.content,
+                    "content": shown,
                 }
             )
-            # The next model call must contain this string verbatim.
-            self.messages.append({"role": "user", "content": result.content})
             if result.status in _MALFORMED_STATUSES:
                 streak += 1
                 if streak >= _MALFORMED_LIMIT:
                     return self._finish("malformed", "Stopped because three replies in a row were malformed.")
             else:
                 streak = 0
+
+    def _fit_context(self) -> None:
+        """Shorten the oldest long tool results until the next call fits."""
+        budget = self.config.context_budget
+        for _ in range(40):
+            if count_message_tokens(self.messages) <= budget:
+                return
+            candidates = [
+                i
+                for i, message in enumerate(self.messages)
+                if message["role"] == "user" and len(message["content"]) > 80
+            ]
+            if not candidates:
+                return
+            index = candidates[0]
+            self.messages[index]["content"] = _shorten(self.messages[index]["content"])
 
     def _append(self, event: dict) -> None:
         self.transcript.append(event)
@@ -110,3 +127,15 @@ class Session:
         if not text.strip():
             text = "Done."
         return AgentResult(text=text, status=status, transcript=copy.deepcopy(self.transcript))
+
+
+def _shorten(text: str) -> str:
+    """Keep the head and tail of a long tool result."""
+    if len(text) <= 80:
+        return text[: max(len(text) // 2, 1)]
+    keep = max(40, len(text) // 4)
+    note = "\n[output truncated]\n"
+    shortened = text[:keep] + note + text[-keep:]
+    if len(shortened) >= len(text):
+        return text[: len(text) // 2]
+    return shortened
